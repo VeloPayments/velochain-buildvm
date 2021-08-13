@@ -9,7 +9,7 @@ To create this image, you will need:
 * QEMU.    
 * GCC.
 
-minweb: https://github.com/nanolith/minweb
+[minweb]: https://github.com/nanolith/minweb
 
 Running the build scripts
 -------------------------

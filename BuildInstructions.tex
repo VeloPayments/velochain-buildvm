@@ -1,0 +1,840 @@
+\title{Build Instructions for velochain}
+
+\section{Introduction}
+
+This document covers the build and configuration process for the velochain OS
+image. Much of the inspiration for this document and build came from the
+\emph{Linux Journal} article,
+\jhref{https://www.linuxjournal.com/content/diy-build-custom-minimal-linux-distribution-source}{
+``DIY: Build a Custom Minimal Linux Distribution from Source''}, by Petros
+Koutoupis.
+
+To fetch all relevant packages and build this OS image, you will need to run
+these scripts from a Linux system.  The following commands can be executed:
+
+\begin{lstlisting}
+mkdir build
+cd build
+../extract.sh ../BuildInstructions.tex
+./make-build-document.sh
+./make-image.sh
+\end{lstlisting}
+
+This document builds the following versions of components. These will be updated
+in subsequent releases.
+
+<<versions>>=
+LINUX_VERSION=5.13.9
+GCC_VERSION=11.2.0
+GMP_VERSION=6.2.1
+MPFR_VERSION=4.1.0
+MPC_VERSION=1.2.1
+GLIBC_VERSION=2.34
+BUSYBOX_VERSION=1.33.1
+>>@<<
+
+The rest of this document will describe the build process in detail.
+
+\section{Extracting source files from this document}
+
+We use \verb/mintangle/ to extract the source files from this document.
+Everything is provided in the script, \verb/extract.sh/, which is provided both
+in this document and in this source distribution.  This script reads a listing
+of all script files from this document, extracts them, and marks them as
+executable.  Then, it extracts all other files from this document.
+
+To start, we define a variable to stand in for the main document.  This is done
+mainly to keep the source listings within the margin of this document.
+
+<<doc>>=
+DOC=../BuildInstructions.tex
+>>@<<
+
+For the non-scripts, we just extract them.  The \verb/-L/ option for
+\verb/mintangle/ lists all \verb/FILE/ sections, which are the various roots for
+files.  This is then fed to \verb/egrep/ to \emph{exclude} any file ending in
+\verb/.sh/.  The \verb/-r/ option allows for the selection of the root for
+extraction.  The \verb/mintangle/ command evaluates all macros within the
+document and then applies them to where they are used.  It then extracts the
+root (\verb/*/ if one is not specified with \verb/-r/), writing this value to
+an output file.
+
+<<extract-non-scripts>>=
+for n in `mintangle -L $DOC | egrep -v "[.]sh$|[.]exp$"`; do
+    mintangle -r $n $DOC
+done
+>>@<<
+
+For the scripts, we extract them and mark them as executable. Here, we make use
+of \verb/chmod/ to mark them as executable. The \verb/-v/ option is left off of
+\verb/egrep/ to \emph{include} only these files instead of excluding them from
+the results.
+
+<<extract-scripts>>=
+for n in `mintangle -L $DOC | egrep "[.]sh$|[.]exp"$`; do
+    mintangle -r $n $DOC && touch $n && chmod +x $n
+done
+>>@<<
+
+\newpage
+
+The complete shell script can thus be assembled.  Note that the name of this
+root is \verb/FILE:extract.sh/, (rendered as just \verb/extract.sh/ in the final
+document) which indicates that this is the desired filename for extraction.
+Each of the macro references, starting with the double less-than and ending with
+the double greater-than, but without the assignment at the end, cause
+\verb/mintangle/ to perform a text substitution, placing the value defined above
+into the macro at that place.  Besides that, we see the shebang to define this
+script as a Bourne shell script, which is the convention used throughout the
+rest of the document.  This extraction script is checked in verbatim as a
+convenience to bootstrap this build process.
+
+<<FILE:extract.sh>>=
+#!/bin/sh
+
+<<doc>>
+<<extract-non-scripts>>
+<<extract-scripts>>
+>>@<<
+
+\section{Building this Document}
+
+To build this document, we use \verb/minweave/ to weave it, all macros, and the
+template into a valid PDF file.  The script to do this is here.  The \verb/-L/
+option here specifies the markup language as Bourne Shell. The \verb/-T/ option
+specifies a template to use to make this document reflect a more typical Velo
+Payments look and feel.  Finally, \verb/pdflatex/ is used to transform this
+document into a PDF.
+
+<<FILE:make-build-document.sh>>=
+#!/bin/sh
+
+minweave -L sh -o BuildInstructions.tex -T ../template.tex \
+    ../BuildInstructions.tex
+pdflatex BuildInstructions.tex
+pdflatex BuildInstructions.tex
+>>@<<
+
+\pagebreak
+
+\section{Build Script Basics}
+
+We want this shell script to display every line as it executes (\verb/-x/),
+to exit on the first failure (\verb/-e/), and to hash all commands (\verb/-h/).
+
+<<FILE:build.sh>>=
+#!/bin/bash -e -x -h
+>>@<<
+
+This script uses the versions defined at the beginning of this document.
+
+<<FILE:build.sh>>=
+<<versions>>
+export LINUX_VERSION GCC_VERSION GMP_VERSION MPFR_VERSION
+export MPC_VERSION GLIBC_VERSION BUSYBOX_VERSION
+>>@<<
+
+Next, we set the default user mask to \verb/S_IWGRP/ \verb/|/ \verb/S_IWOTH/, or
+$022$.  This ensures that only the user has write permissions on the files
+created.  While this is the default, it's possible that the current umask under
+which this script is executing is not the default.
+
+<<FILE:build.sh>>=
+umask 022
+>>@<<
+
+For convenience, we save the current working directory as \verb/WD/, which saves
+the script from having to compute this directory repeatedly. We then query the
+number of processor cores using the \verb/getconf/ command.  Next, \verb/OSDIR/
+is set to where the OS image will be built. We then set \verb/LC_ALL/ and
+\verb/PATH/ to sane values. We set \verb/PKG_DIR/ to the location where we will
+fetch packages.  Finally, we create the \verb/OSDIR/ and \verb/PKG_DIR/
+directories.
+
+<<FILE:build.sh>>=
+WD=`pwd`
+CORES=`getconf _NPROCESSORS_ONLN`
+OSDIR=${WD}/linux
+LC_ALL=POSIX
+PATH=${OSDIR}/cross-tools/bin:/bin:/usr/bin
+PKG_DIR=${WD}/packages
+export WD CORES OSDIR LC_ALL PATH PKG_DIR
+mkdir -pv $OSDIR $PKG_DIR
+>>@<<
+
+To round out the basics that we need to set up for this OS build, we will create
+the image directory hierarchy, the cross-tools directory, the root entry in our
+\verb/passwd/ file, the default \verb/group/ file, the default \verb/fstab/,
+the default \verb/.profile/, the host name, the login message, the basic
+\verb/busybox/ \verb/inittab/, the default \verb/mdev.conf/, the default
+\verb/grub.cfg/, and the starting log files. However, we only want to do this
+work once: when these files do not exist. So, at the end of this process, we
+will touch a \verb/.basics/ file which indicates that we completed this step.
+
+<<FILE:build.sh>>=
+if [ ! -f ${WD}/.basics ]; then
+    <<basics-image-directory-hierarchy>>
+    <<basics-cross-tools-directory>>
+    <<basics-passwd>>
+    <<basics-group>>
+    <<basics-fstab>>
+    <<basics-profile>>
+    <<basics-hostname>>
+    <<basics-login>>
+    <<basics-busybox-inittab>>
+    <<basics-mdev-conf>>
+    <<basics-grub-cfg>>
+    <<basics-log-files>>
+    touch ${WD}/.basics
+else
+    echo "Basics already built."
+fi
+>>@<<
+
+\subsection{Image Directory Hierarchy}
+
+We can now build up the required directory hierarchy for the image filesystem.
+This directory structure is largely defined by the POSIX standard. As long as
+these directories exist, most if not all programs we try to run in the image
+will operate correctly.
+
+<<basics-image-directory-hierarchy>>=
+mkdir -pv $OSDIR
+mkdir -pv ${OSDIR}/{bin,boot{,grub},dev,{etc/,}opt,home,lib/{firmware,modules},lib64,mnt}
+mkdir -pv ${OSDIR}/{proc,media/{floppy,cdrom},sbin,srv,sys}
+mkdir -pv ${OSDIR}/var/{lock,log,mail,run,spool}
+mkdir -pv ${OSDIR}/var/{opt,cache,lib/{misc,locate},local}
+install -dv -m 0750 ${OSDIR}/root
+install -dv -m 1777 ${OSDIR}{/var,}/tmp
+install -dv ${OSDIR}/etc/init.d
+mkdir -pv ${OSDIR}/usr/{,local/}{bin,include,lib{,64},sbin,src}
+mkdir -pv ${OSDIR}/usr/{,local/}share/{doc,info,locale,man}
+mkdir -pv ${OSDIR}/usr/{,local/}share/{misc,terminfo,zoneinfo}
+mkdir -pv ${OSDIR}/usr/{,local/}share/man/man{1,2,3,4,5,6,7,8}
+for dir in ${OSDIR}/usr{,/local}; do
+    ln -sv share/{man,doc,info} ${dir}
+done
+mkdir -pv ${OSDIR}/boot/grub
+>>@<<
+
+\subsection{Cross Tools Directory}
+
+The Cross Tools directory is where we will install the cross-compilation tools
+which are used to build this image.
+
+<<basics-cross-tools-directory>>=
+#create the crosstools directory
+install -dv ${OSDIR}/cross-tools{,/bin}
+>>@<<
+
+\subsection{Unix passwd file}
+
+Next up, we will create a passwd file.  For the time being, it will just include
+the \verb/root/ user with no password set.  We will get back to the password
+later.
+
+<<basics-passwd>>=
+#create a root entry in /etc/passwd with no password for now.
+cat > ${OSDIR}/etc/passwd << "EOF"
+root::0:0:root:/root:/bin/ash
+EOF
+>>@<<
+
+\newpage
+
+\subsection{Default group file}
+
+We will create a default group file with all of the groups required by POSIX and
+Linux.
+
+<<basics-group>>=
+#create a default /etc/group
+cat > ${OSDIR}/etc/group << "EOF"
+root:x:0:
+bin:x:1:
+sys:x:2:
+kmem:x:3:
+tty:x:4:
+daemon:x:6:
+disk:x:8:
+dialout:x:10:
+video:x:12:
+utmp:x:13:
+usb:x:14:
+EOF
+>>@<<
+
+\subsection{Filesystem Table}
+
+The filesystem table is used to mount each filesystem.  The first entry is for
+the physical disk -- the root filesystem.  Subsequent entries are for special
+filesystems defined by the Linux kernel.
+
+<<basics-fstab>>=
+#the default fstab
+cat > ${OSDIR}/etc/fstab << "EOF"
+# file system  mount-point  type   options          dump  fsck
+#                                                         order
+
+rootfs          /               auto    defaults        1      1
+proc            /proc           proc    defaults        0      0
+sysfs           /sys            sysfs   defaults        0      0
+devpts          /dev/pts        devpts  gid=4,mode=620  0      0
+tmpfs           /dev/shm        tmpfs   defaults        0      0
+EOF
+>>@<<
+
+\subsection{Default .profile}
+
+The default \verb/.profile/ is used when creating a new user.  We set up the
+default path for both normal users and \verb/root/.  We also set up environment
+variables expected by various POSIX commands.
+
+<<basics-profile>>=
+#the default .profile
+cat > ${OSDIR}/etc/profile << "EOF"
+export PATH=/bin:/usr/bin
+
+if [ `id -u` -eq 0 ] ; then
+        PATH=/bin:/sbin:/usr/bin:/usr/sbin
+        unset HISTFILE
+fi
+
+
+# Set up some environment variables.
+export USER=`id -un`
+export LOGNAME=$USER
+export HOSTNAME=`/bin/hostname`
+export HISTSIZE=1000
+export HISTFILESIZE=1000
+export PAGER='/bin/more '
+export EDITOR='/bin/vi'
+EOF
+>>@<<
+
+\subsection{Hostname}
+
+For this image, we are using the hostname \verb/vbuilder/, or Velo Builder.
+
+<<basics-hostname>>=
+#the hostname
+echo "vbuilder" > ${OSDIR}/etc/HOSTNAME
+>>@<<
+
+\subsection{Login Message}
+
+Here, we use a very simple login message, that just echoes the name of the build
+system.  If we were building a production image, then we'd consider something
+more meaningful.
+
+<<basics-login>>=
+#Login message.
+cat > ${OSDIR}/etc/issue<< "EOF"
+vbuilder
+EOF
+>>@<<
+
+\subsection{busybox inittab}
+
+We are using \verb/busybox/ to provide most commands and a simple init process.
+When \verb/busybox/ runs as init, it looks at \verb"/etc/inittab" to decide
+which processes to spawn at startup.  It also provides special scripting hooks
+for system init, system shutdown, and system reboot. We define script locations
+for each.
+
+<<basics-busybox-inittab>>=
+#basic busybox init
+cat > ${OSDIR}/etc/inittab<< "EOF"
+::sysinit:/etc/rc.d/startup
+
+tty1::respawn:/sbin/getty 38400 tty1
+tty2::respawn:/sbin/getty 38400 tty2
+tty3::respawn:/sbin/getty 38400 tty3
+tty4::respawn:/sbin/getty 38400 tty4
+tty5::respawn:/sbin/getty 38400 tty5
+tty6::respawn:/sbin/getty 38400 tty6
+
+::shutdown:/etc/rc.d/shutdown
+::ctrlaltdel:/sbin/reboot
+EOF
+>>@<<
+
+\subsection {mdev configuration}
+
+The mdev system controls how devices are populated by the kernel both during
+initial boot and also as they are discovered during hot plugging.  This config
+defines how these devices should be configured, what permissions and ownership
+they should have, and any commands that should be executed when they are
+detected.
+
+<<basics-mdev-conf>>=
+#default mdev
+xvar='$x'
+MDEV_VAR='$MDEV'
+CONSOLE_MKDIR_CD="@mkdir -pm 755 fd && cd fd"
+CONSOLE_FORLOOP="for x in 0 1 2 3; do ln -sf /proc/self/fd/${xvar} ${xvar}; done"
+CONSOLE_MDEV_CMD="$CONSOLE_MKDIR_CD && $CONSOLE_FORLOOP"
+cat > ${OSDIR}/etc/mdev.conf<<EOF
+# Devices:
+# Syntax: %s %d:%d %s
+# devices user:group mode
+
+# null does already exist; therefore ownership has to
+# be changed with command
+null    root:root 0666  @chmod 666 ${MDEV_VAR}
+zero    root:root 0666
+grsec   root:root 0660
+full    root:root 0666
+
+random  root:root 0666
+urandom root:root 0444
+hwrandom root:root 0660
+
+# console does already exist; therefore ownership has to
+# be changed with command
+console root:tty 0600 ${CONSOLE_MDEV_CMD}
+
+kmem    root:root 0640
+mem     root:root 0640
+port    root:root 0640
+ptmx    root:tty 0666
+
+# ram.*
+ram([0-9]*)     root:disk 0660 >rd/%1
+loop([0-9]+)    root:disk 0660 >loop/%1
+sd[a-z].*       root:disk 0660 */lib/mdev/usbdisk_link
+hd[a-z][0-9]*   root:disk 0660 */lib/mdev/ide_links
+
+tty             root:tty 0666
+tty[0-9]        root:root 0600
+tty[0-9][0-9]   root:tty 0660
+ttyO[0-9]*      root:tty 0660
+pty.*           root:tty 0660
+vcs[0-9]*       root:tty 0660
+vcsa[0-9]*      root:tty 0660
+
+ttyLTM[0-9]     root:dialout 0660 @ln -sf ${MDEV_VAR} modem
+ttySHSF[0-9]    root:dialout 0660 @ln -sf ${MDEV_VAR} modem
+slamr           root:dialout 0660 @ln -sf ${MDEV_VAR} slamr0
+slusb           root:dialout 0660 @ln -sf ${MDEV_VAR} slusb0
+fuse            root:root  0666
+
+# misc stuff
+agpgart         root:root 0660  >misc/
+psaux           root:root 0660  >misc/
+rtc             root:root 0664  >misc/
+
+# input stuff
+event[0-9]+     root:root 0640 =input/
+ts[0-9]         root:root 0600 =input/
+
+# v4l stuff
+vbi[0-9]        root:video 0660 >v4l/
+video[0-9]      root:video 0660 >v4l/
+
+# load drivers for usb devices
+usbdev[0-9].[0-9]       root:root 0660 */lib/mdev/usbdev
+usbdev[0-9].[0-9]_.*    root:root 0660
+EOF
+>>@<<
+
+\subsection{Grub Configuration}
+
+We boot the image with the GRUB bootloader. The following configuration file
+sets up a single menu entry in the boot loader which boots our kernel with a
+serial console.  We will use the serial console for further configuration.
+
+<<basics-grub-cfg>>=
+#Build the grub configuration
+BOOT_CONSOLE="console=/dev/ttyS0,115200"
+BOOT_OPTIONS="root=/dev/sda1 ro quiet $BOOT_CONSOLE"
+cat > ${OSDIR}/boot/grub/grub.cfg<<EOF
+
+set default=0
+set timeout=5
+
+set root=(hd0,1)
+
+menuentry "vbuilder" {
+        linux   /boot/vmlinuz-${LINUX_VERSION} ${BOOT_OPTIONS}
+}
+EOF
+>>@<<
+
+\subsection{Initial Log Files}
+
+For the system to boot up correctly, we need to set up some dummy log files.
+These will be appended during bootup and by busybox.
+
+<<basics-log-files>>=
+#set the log files
+touch ${OSDIR}/var/run/utmp ${OSDIR}/var/log/{btmp,lastlog,wtmp}
+chmod -v 664 ${OSDIR}/var/run/utmp ${OSDIR}/var/log/lastlog
+>>@<<
+
+\section{Downloading and Extracting Source Packages}
+
+Before the build, we will download and extract all packages.  We need to build
+GCC, the Linux kernel, GRUB, and busybox.  So, we will start with downloading,
+verifying, and extracting all of them.
+
+<<FILE:build.sh>>=
+    <<download-verify-and-extract-gcc>>
+    <<download-verify-and-extract-gmp>>
+    <<download-verify-and-extract-mpfr>>
+    <<download-verify-and-extract-mpc>>
+    <<download-verify-and-extract-linux>>
+    <<download-verify-and-extract-busybox>>
+>>@<<
+
+\newpage
+
+\subsection{The GCC Source Package}
+
+For gcc, we will check to see if the package file has been downloaded. If it has
+not, we will download it.  Then, we will verify its checksum and extract it.
+
+<<download-verify-and-extract-gcc>>=
+GCC_BASEFILE=gcc-${GCC_VERSION}.tar.xz
+GCC_PKGFILE=${PKG_DIR}/${GCC_BASEFILE}
+GCC_URL=http://ftpmirror.gnu.org/gnu/gcc/gcc-${GCC_VERSION}
+GCC_DIR=${PKG_DIR}/gcc-${GCC_VERSION}
+if [ ! -f ${PKG_DIR}/${GCC_BASEFILE} ]; then
+    (cd ${PKG_DIR} && curl -L -O ${GCC_URL}/${GCC_BASEFILE})
+else
+    echo ${PKG_DIR}/${GCC_BASEFILE} already downloaded.
+fi
+>>@<<
+
+We can then verify that the GCC package we have matches the pre-computed SHA-512
+hash in the script.  This ensures that the package is a known good package that
+did not fail in download and was not tampered with.
+
+<<download-verify-and-extract-gcc>>=
+GCC_EXPECTED_CKSUM=\
+d53a0a966230895c54f01aea38696f81\
+8817b505f1e2bfa65e508753fcd01b2a\
+edb4a61434f41f3a2ddbbd9f41384b96\
+153c684ded3f0fa97c82758d9de5c7cf
+if [ ! -f ${GCC_PKGFILE}.verified ]; then
+    GCC_CKSUM=`openssl dgst -sha512 -hex ${GCC_PKGFILE}`
+    GCC_CKSUM=`echo ${GCC_CKSUM} | awk -F= '{print $2}' | sed -e 's/^[ \t]//'`
+    if [ "${GCC_EXPECTED_CKSUM}" = "${GCC_CKSUM}" ]; then
+        touch ${GCC_PKGFILE}.verified
+        echo "${GCC_PKGFILE} verified."
+    else
+        echo "${GCC_PKGFILE} could not be verified (${GCC_CKSUM})."
+        exit 1
+    fi
+else
+    echo "${GCC_PKGFILE} already verified."
+fi
+>>@<<
+
+Finally, we can extract gcc.
+
+<<download-verify-and-extract-gcc>>=
+if [ ! -f ${GCC_PKGFILE}.extracted ]; then
+    (cd ${PKG_DIR} && xz -dc ${GCC_BASEFILE} | tar -xvf -)
+    touch ${GCC_PKGFILE}.extracted
+else
+    echo "${GCC_PKGFILE} already extracted."
+fi
+>>@<<
+
+\newpage
+
+\subsection{The GMP Source Package}
+
+GMP is the GNU Multiprecision Library.  It is used in GCC as part of its bignum
+implementation.  As before, we will repeat the basic download, verify, and
+extract process for busybox.  First, we will check to see if the package has
+already been downloaded.  If not, we will download it.  Then, we will verify and
+extract it.  Finally, we will move this source directory to the GCC source
+directory so it is automatically picked up by GCC's configure process.
+
+<<download-verify-and-extract-gmp>>=
+GMP_BASEFILE=gmp-${GMP_VERSION}.tar.bz2
+GMP_PKGFILE=${PKG_DIR}/${GMP_BASEFILE}
+GMP_URL=http://ftpmirror.gnu.org/gnu/gmp/${GMP_BASEFILE}
+GMP_DIR=${PKG_DIR}/gmp-${GMP_VERSION}
+if [ ! -f ${GMP_PKGFILE} ]; then
+    (cd ${PKG_DIR} && curl -L -O ${GMP_URL})
+else
+    echo ${GMP_PKGFILE} already downloaded
+fi
+>>@<<
+
+We can then verify that the GMP package we have matches the pre-computed
+SHA-512 hash in the script.  This ensures that the package is a known good
+package that did not fail in download and was not tampered with.
+
+<<download-verify-and-extract-gmp>>=
+GMP_EXPECTED_HASH=\
+8904334a3bcc5c896ececabc75cda9de\
+c642e401fb5397c4992c4fabea5e962c\
+9ce8bd44e8e4233c34e55c8010cc28db\
+0545f5f750cbdbb5f00af538dc763be9
+if [ ! -f ${GMP_PKGFILE}.verified ]; then
+    GMP_CK=`openssl dgst -sha512 -hex ${GMP_PKGFILE}`
+    GMP_CK=`echo ${GMP_CK} | awk -F= '{print $2}' | sed -e 's/^[ \t]//'`
+    if [ "${GMP_EXPECTED_HASH}" = "${GMP_CK}" ]; then
+        touch ${GMP_PKGFILE}.verified
+        echo "${GMP_PKGFILE} verified."
+    else
+        echo "${GMP_PKGFILE} could not be verified (${GMP_CK})."
+        exit 1
+    fi
+else
+    echo "${GMP_PKGFILE} already verified."
+fi
+>>@<<
+
+Next, we can extract GMP, and move it to a known good location in the GCC source
+tree.
+
+<<download-verify-and-extract-gmp>>=
+if [ ! -f ${GMP_PKGFILE}.extracted ]; then
+    (cd ${PKG_DIR} && bzip2 -dc ${GMP_BASEFILE} | tar -xvf -)
+    mv ${GMP_DIR} ${GCC_DIR}/gcc/gmp
+    touch ${GMP_PKGFILE}.extracted
+else
+    echo "${GMP_PKGFILE} already extracted."
+fi
+>>@<<
+
+\newpage
+
+\subsection{The MPC Source Package}
+
+MPC is a complex floating point library for GCC.  As before, we will repeat the
+basic download, verify, and extract process for busybox.  First, we will check
+to see if the package has already been downloaded.  If not, we will download it.
+Then, we will verify and extract it.  Finally, we will move this source
+directory to the GCC source directory so it is automatically picked up by GCC's
+configure process.
+
+<<download-verify-and-extract-mpc>>=
+MPC_BASEFILE=mpc-${MPC_VERSION}.tar.gz
+MPC_PKGFILE=${PKG_DIR}/${MPC_BASEFILE}
+MPC_URL=http://ftpmirror.gnu.org/gnu/mpc/${MPC_BASEFILE}
+MPC_DIR=${PKG_DIR}/mpc-${MPC_VERSION}
+if [ ! -f ${MPC_PKGFILE} ]; then
+    (cd ${PKG_DIR} && curl -L -O ${MPC_URL})
+else
+    echo ${MPC_PKGFILE} already downloaded
+fi
+>>@<<
+
+We can then verify that the MPC package we have matches the pre-computed
+SHA-512 hash in the script.  This ensures that the package is a known good
+package that did not fail in download and was not tampered with.
+
+<<download-verify-and-extract-mpc>>=
+MPC_EXPECTED_HASH=\
+3279f813ab37f47fdcc800e4ac5f3064\
+17d07f539593ca715876e43e04896e1d\
+5bceccfb288ef2908a3f24b760747d0d\
+bd0392a24b9b341bc3e12082e5c836ee
+if [ ! -f ${MPC_PKGFILE}.verified ]; then
+    MPC_CK=`openssl dgst -sha512 -hex ${MPC_PKGFILE}`
+    MPC_CK=`echo ${MPC_CK} | awk -F= '{print $2}' | sed -e 's/^[ \t]//'`
+    if [ "${MPC_EXPECTED_HASH}" = "${MPC_CK}" ]; then
+        touch ${MPC_PKGFILE}.verified
+        echo "${MPC_PKGFILE} verified."
+    else
+        echo "${MPC_PKGFILE} could not be verified (${MPC_CK})."
+        exit 1
+    fi
+else
+    echo "${MPC_PKGFILE} already verified."
+fi
+>>@<<
+
+Next, we can extract MPC, and move it to a known good location in the GCC source
+tree.
+
+<<download-verify-and-extract-mpc>>=
+if [ ! -f ${MPC_PKGFILE}.extracted ]; then
+    (cd ${PKG_DIR} && gzip -dc ${MPC_BASEFILE} | tar -xvf -)
+    mv ${MPC_DIR} ${GCC_DIR}/gcc/mpc
+    touch ${MPC_PKGFILE}.extracted
+else
+    echo "${MPC_PKGFILE} already extracted."
+fi
+>>@<<
+
+\newpage
+
+\subsection{The MPFR Source Package}
+
+MPFR is a multi-precision floating point library with rounding, needed by GCC.
+As before, we will repeat the basic download, verify, and extract process for
+busybox.  First, we will check to see if the package has already been
+downloaded.  If not, we will download it.  Then, we will verify and extract it.
+Finally, we will move this source directory to the GCC source directory so it is
+automatically picked up by GCC's configure process.
+
+<<download-verify-and-extract-mpfr>>=
+MPFR_BASEFILE=mpfr-${MPFR_VERSION}.tar.xz
+MPFR_PKGFILE=${PKG_DIR}/${MPFR_BASEFILE}
+MPFR_URL=http://ftpmirror.gnu.org/gnu/mpfr/${MPFR_BASEFILE}
+MPFR_DIR=${PKG_DIR}/mpfr-${MPFR_VERSION}
+if [ ! -f ${MPFR_PKGFILE} ]; then
+    (cd ${PKG_DIR} && curl -L -O ${MPFR_URL})
+else
+    echo ${MPFR_PKGFILE} already downloaded
+fi
+>>@<<
+
+We can then verify that the MPFR package we have matches the pre-computed
+SHA-512 hash in the script.  This ensures that the package is a known good
+package that did not fail in download and was not tampered with.
+
+<<download-verify-and-extract-mpfr>>=
+MPFR_EXPECTED_HASH=\
+1bd1c349741a6529dfa53af4f0da8d49\
+254b164ece8a46928cdb13a994602856\
+22d57fe6f68cef19c6727b3f9daa25dd\
+b3d7d65c201c8f387e421c7f7bee6273
+if [ ! -f ${MPFR_PKGFILE}.verified ]; then
+    MPFR_CK=`openssl dgst -sha512 -hex ${MPFR_PKGFILE}`
+    MPFR_CK=`echo ${MPFR_CK} | awk -F= '{print $2}' | sed -e 's/^[ \t]//'`
+    if [ "${MPFR_EXPECTED_HASH}" = "${MPFR_CK}" ]; then
+        touch ${MPFR_PKGFILE}.verified
+        echo "${MPFR_PKGFILE} verified."
+    else
+        echo "${MPFR_PKGFILE} could not be verified (${MPFR_CK})."
+        exit 1
+    fi
+else
+    echo "${MPFR_PKGFILE} already verified."
+fi
+>>@<<
+
+Next, we can extract MPFR, and move it to a known good location in the GCC
+source tree.
+
+<<download-verify-and-extract-mpfr>>=
+if [ ! -f ${MPFR_PKGFILE}.extracted ]; then
+    (cd ${PKG_DIR} && xz -dc ${MPFR_BASEFILE} | tar -xvf -)
+    mv ${MPFR_DIR} ${GCC_DIR}/gcc/mpfr
+    touch ${MPFR_PKGFILE}.extracted
+else
+    echo "${MPFR_PKGFILE} already extracted."
+fi
+>>@<<
+
+\newpage
+
+\subsection{The Linux Source Package}
+
+We can repeat this basic download, verify, and extract for the Linux kernel.
+First, we will check to see if the package has been downloaded.  If not, we will
+download it.  Then, we will verify its checksum and extract it.
+
+<<download-verify-and-extract-linux>>=
+LINUX_BASEFILE=linux-${LINUX_VERSION}.tar.xz
+LINUX_PKGFILE=${PKG_DIR}/${LINUX_BASEFILE}
+LINUX_URL=https://mirrors.kernel.org/pub/linux/kernel/v5.x/${LINUX_BASEFILE}
+LINUX_DIR=${PKG_DIR}/linux-${LINUX_VERSION}
+if [ ! -f ${LINUX_PKGFILE} ]; then
+  (cd ${PKG_DIR} && curl -L -O ${LINUX_URL})
+else
+    echo ${LINUX_PKGFILE} already downloaded.
+fi
+>>@<<
+
+We can then verify that the Linux package we have matches the pre-computed
+SHA-512 hash in the script.  This ensures that the package is a known good
+package that did not fail in download and was not tampered with.
+
+<<download-verify-and-extract-linux>>=
+LINUX_EXPECTED_HASH=\
+85ee6554fb77a47fbe5242ab2a92ab5c\
+e90c170df7f58fa252192186ce2f724d\
+29ee20c2d2e8bb118730bc6a1e6148b1\
+32faa209dcd801cb73e6c480d8b51157
+if [ ! -f ${LINUX_PKGFILE}.verified ]; then
+    LINUX_CK=`openssl dgst -sha512 -hex ${LINUX_PKGFILE}`
+    LINUX_CK=`echo ${LINUX_CK} | awk -F= '{print $2}' | sed -e 's/^[ \t]//'`
+    if [ "${LINUX_EXPECTED_HASH}" = "${LINUX_CK}" ]; then
+        touch ${LINUX_PKGFILE}.verified
+        echo "${LINUX_PKGFILE} verified."
+    else
+        echo "${LINUX_PKGFILE} could not be verified (${LINUX_CK})."
+        exit 1
+    fi
+else
+    echo "${LINUX_PKGFILE} already verified."
+fi
+>>@<<
+
+Finally, we can extract the linux kernel.
+
+<<download-verify-and-extract-linux>>=
+if [ ! -f ${LINUX_PKGFILE}.extracted ]; then
+    (cd ${PKG_DIR} && xz -dc ${LINUX_BASEFILE} | tar -xvf -)
+    touch ${LINUX_PKGFILE}.extracted
+else
+    echo ${LINUX_PKGFILE} already extracted.
+fi
+>>@<<
+
+\newpage
+
+\subsection{The busybox Source Package}
+
+busybox provides us with a Swiss army knife of userland tools, which is perfect
+for building a small distribution. As before, we will repeat the basic download,
+verify, and extract process for busybox.  First, we will check to see if the
+package has already been downloaded.  If not, we will download it.  Then, we
+will verify and extract it.
+
+<<download-verify-and-extract-busybox>>=
+BUSY_BASEFILE=busybox-${BUSYBOX_VERSION}.tar.bz2
+BUSY_PKGFILE=${PKG_DIR}/${BUSY_BASEFILE}
+BUSY_URL=https://busybox.net/downloads/${BUSY_BASEFILE}
+BUSY_DIR=${PKG_DIR}/busybox-${BUSYBOX_VERSION}
+if [ ! -f ${BUSY_PKGFILE} ]; then
+    (cd ${PKG_DIR} && curl -L -O ${BUSY_URL})
+else
+    echo ${BUSY_PKGFILE} already downloaded
+fi
+>>@<<
+
+We can then verify that the busybox package we have matches the pre-computed
+SHA-512 hash in the script.  This ensures that the package is a known good
+package that did not fail in download and was not tampered with.
+
+<<download-verify-and-extract-busybox>>=
+BUSY_EXPECTED_HASH=\
+d24931432f65e4e79cf54a6c2b91c9ca\
+fba817b637d337f456ce8f505434fc06\
+c4345c65cde4fe2a019650a8a089a6f5\
+336bfafb5ef64a4f14659a9d0b3ddb1a
+if [ ! -f ${BUSY_PKGFILE}.verified ]; then
+    BUSY_CK=`openssl dgst -sha512 -hex ${BUSY_PKGFILE}`
+    BUSY_CK=`echo ${BUSY_CK} | awk -F= '{print $2}' | sed -e 's/^[ \t]//'`
+    if [ "${BUSY_EXPECTED_HASH}" = "${BUSY_CK}" ]; then
+        touch ${BUSY_PKGFILE}.verified
+        echo "${BUSY_PKGFILE} verified."
+    else
+        echo "${BUSY_PKGFILE} could not be verified (${BUSY_CK})."
+        exit 1
+    fi
+else
+    echo "${BUSY_PKGFILE} already verified."
+fi
+>>@<<
+
+Finally, we can extract busybox.
+
+<<download-verify-and-extract-busybox>>=
+if [ ! -f ${BUSY_PKGFILE}.extracted ]; then
+    (cd ${PKG_DIR} && bzip2 -dc ${BUSY_BASEFILE} | tar -xvf -)
+    touch ${BUSY_PKGFILE}.extracted
+else
+    echo "${BUSY_PKGFILE} already extracted."
+fi
+>>@<<

@@ -1037,6 +1037,7 @@ components.
     <<cross-build-gcc-static>>
     <<cross-build-glibc>>
     <<cross-build-gcc-final>>
+    <<cross-build-grub>>
     <<cross-use-gcc-final>>
 >>@<<
 
@@ -1208,9 +1209,33 @@ if [ ! -f ${GCC_PKGFILE}.built ]; then
     --disable-multilib --with-arch=${OS_CPU}
     make -j${CORES} && make install
     cp -v ${OSDIR}/cross-tools/${OS_TARGET}/lib64/libgcc_s.so.1 ${OSDIR}/lib64
+    cd ${WD}
     touch ${GCC_PKGFILE}.built
 else
     echo "gcc final already built."
+fi
+>>@<<
+
+\subsection{Building GRUB}
+
+We will use GRUB to install the bootloader for bootstrapping Linux. Although
+this is a system dependency, the GRUB tool actually installs the requisite
+binaries to the boot partition when we run it. So, there is no need to install
+this in the OS image itself.  Instead, we will install it into the cross-tools
+directory.
+
+<<cross-build-grub>>=
+#build grub
+if [ ! -f ${GRUB_PKGFILE}.built ]; then
+    cd ${GRUB_DIR}
+    mkdir build
+    cd build
+    ../configure --prefix=${OSDIR}/cross-tools
+    make -j${CORES} && make install
+    cd ${WD}
+    touch ${GRUB_PKGFILE}.built
+else
+    echo "GRUB already built."
 fi
 >>@<<
 
@@ -1230,4 +1255,71 @@ export LD="${OS_TARGET}-ld"
 export RANLIB="${OS_TARGET}-ranlib"
 export READELF="${OS_TARGET}-readelf"
 export STRIP="${OS_TARGET}-strip"
+>>@<<
+
+\section{Building System Binaries}
+
+Now we can build the Linux kernel and all needed system binaries. We will use
+the cross compilation tools we built during the previous section, as well as GNU
+libc.  Once these are built, we can create the QEmu image, mount it, partition
+it, format it, and install these system binaries.  Additionally, we can install
+any optional packages we wish to include in this minimal OS image.
+
+<<FILE:build.sh>>=
+    <<build-busybox>>
+    <<build-linux-kernel>>
+>>@<<
+
+\subsection{Building busybox}
+
+We can now build busybox with the new cross compiler tools.  We will use busybox
+to provide most of the userland we will need in this VM.
+
+<<build-busybox>>=
+#build busybox
+if [ ! -f ${BUSY_PKGFILE}.built ]; then
+    cd ${BUSY_DIR}
+    make CROSS_COMPILE="${OS_TARGET}-" defconfig
+    make -j${CORES} CROSS_COMPILE="${OS_TARGET}-"
+    make CROSS_COMPILE="${OS_TARGET}-" CONFIG_PREFIX="${OSDIR}" install
+    cp -v examples/depmod.pl ${OSDIR}/cross-tools/bin
+    chmod 755 ${OSDIR}/cross-tools/bin/depmod.pl
+    cd ${WD}
+    touch ${BUSY_PKGFILE}.built
+else
+    echo "busybox already built."
+fi
+>>@<<
+
+\subsection{Building the Linux kernel}
+
+We will build a "good enough" configuration of the Linux kernel.  I have added
+some tweaks to remove a few drivers that cause OpenBSD's VMD some issues.  Since
+these drivers are not needed by QEMU, this won't be an issue.
+
+<<build-linux-kernel>>=
+#build the Linux kernel
+if [ ! -f ${LINUX_PKGFILE}.built ]; then
+    cd ${LINUX_DIR}
+    #create the default config
+    make ARCH=${OS_ARCH} CROSS_COMPILE=${OS_TARGET}- x86_64_defconfig
+    #back up this default config
+    cp .config .config-backup
+    #remove the INTEL_PSTATE driver, as this doesn't work in OpenBSD VMD
+    #also, remove a bunch of other unnecessary things.
+    cat .config-backup | sed '/CONFIG_X86_INTEL_PSTATE/d' > .config
+    make -j${CORES} ARCH=${OS_ARCH} CROSS_COMPILE=${OS_TARGET}-
+    make ARCH=${OS_ARCH} CROSS_COMPILE=${OS_TARGET}- \
+        INSTALL_MOD_PATH=${OSDIR} modules_install
+    cp -v arch/x86/boot/bzImage ${OSDIR}/boot/vmlinuz-${LINUX_VERSION}
+    cp -v System.map ${OSDIR}/boot/System.map-${LINUX_VERSION}
+    cp -v .config ${OSDIR}/boot/config-${LINUX_VERSION}
+    mkdir -pv ${OSDIR}/lib/modules/${LINUX_VERSION}
+    ${OSDIR}/cross-tools/bin/depmod.pl \
+        -F ${OSDIR}/boot/System.map-${LINUX_VERSION} \
+        -b ${OSDIR}/lib/modules/${LINUX_VERSION}
+    touch ${LINUX_PKGFILE}.built
+else
+    echo "linux kernel already built."
+fi
 >>@<<

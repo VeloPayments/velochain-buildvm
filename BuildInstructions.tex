@@ -123,8 +123,8 @@ pdflatex BuildInstructions.tex
 We want this shell script to display every line as it executes (\verb/-x/),
 to exit on the first failure (\verb/-e/), and to hash all commands (\verb/-h/).
 
-<<FILE:build.sh>>=
-#!/bin/bash -e -x -h
+<<FILE:build.sh>>=#!/bin/bash -x
+set -e +h
 >>@<<
 
 This script uses the versions defined at the beginning of this document.
@@ -132,7 +132,7 @@ This script uses the versions defined at the beginning of this document.
 <<FILE:build.sh>>=
 <<versions>>
 export LINUX_VERSION GCC_VERSION GMP_VERSION MPFR_VERSION
-export MPC_VERSION GLIBC_VERSION BUSYBOX_VERSION
+export MPC_VERSION BINUTILS_VERSION GLIBC_VERSION BUSYBOX_VERSION
 >>@<<
 
 Next, we set the default user mask to \verb/S_IWGRP/ \verb/|/ \verb/S_IWOTH/, or
@@ -956,4 +956,216 @@ if [ ! -f ${BUSY_PKGFILE}.extracted ]; then
 else
     echo "${BUSY_PKGFILE} already extracted."
 fi
+>>@<<
+
+\newpage
+
+\section{Building the Cross Compilation Tools}
+
+Now we need to bootstrap GCC. To do this, we will first need to build the Linux
+headers for the target image.  Then we can build a simple static GCC compiler,
+which we can use to build GNU libc.  Once we have GNU libc built, we can build
+the final GCC cross compiler, which we can use to build the remaining
+components.
+
+<<FILE:build.sh>>=
+    <<cross-config-variables>>
+    <<cross-build-linux-headers>>
+    <<cross-build-binutils>>
+    <<cross-build-gcc-static>>
+    <<cross-build-glibc>>
+    <<cross-build-gcc-final>>
+    <<cross-use-gcc-final>>
+>>@<<
+
+\subsection{Configuration Variables}
+
+We need to set some variables which we will use in the configuration scripts.
+First, we need to unset \verb/CFLAGS/ and \verb/CXXFLAGS/ if these are set so we
+don't pull in incompatible settings.  Then, we need to ask our local \verb/gcc/
+instance what our machine type is.  We will use this to set the \verb/OS_HOST/
+target.  The \verb/OS_CPU/ target should be tuned for a particular platform if
+the VM that you are using supports it.  However, if you can't know whether the
+VM will support it, I would strongly recommend keeping the \verb/OS_CPU/ target
+as generic.  For instance, AWS or GCP may assign a VM instance to an Intel or
+AMD based system depending upon settings.  If you were to tune to a specific
+chipset, you would get significantly better performance for that chipset, but
+the code may not run on the assigned VM.  Either way, the point of this build is
+to create a generic build image that should run on any modern QEMU instance.
+Thus, we choose \verb/generic/.
+
+<<cross-config-variables>>=
+#config for cross compiler
+unset CFLAGS
+unset CXXFLAGS
+export OS_HOST=$(echo ${MACHTYPE} | sed "s/-[^-]*/-cross/")
+export OS_TARGET=x86_64-unknown-linux-gnu
+export OS_ARCH=$(echo ${OS_TARGET} | sed -e 's/-.*//' -e 's/i.86/i386/')
+export OS_CPU=$(echo ${OS_ARCH} | tr _ -)
+export OS_ENDIAN=little
+>>@<<
+
+\subsection{Building the Linux Headers}
+
+Now, we can build the Linux headers, which are needed for the remaining
+cross-build dependencies.  The \verb/mrproper/ step cleans the source tree and
+resets it. The \verb/headers_install/ step does the real work of installing the
+correct headers for a given architecture.  Finally, these are copied to our OS
+staging directory.
+
+<<cross-build-linux-headers>>=
+#build headers
+if [ ! -f ${LINUX_PKGFILE}.headers ]; then
+    cd ${LINUX_DIR}
+    make mrproper
+    make ARCH=${OS_ARCH} INSTALL_HDR_PATH=dest headers_install
+    cp -rv dest/include/* ${OSDIR}/usr/include
+    cd ${WD}
+    touch ${LINUX_PKGFILE}.headers
+else
+    echo "Kernel headers already built."
+fi
+>>@<<
+
+\subsection{Building GNU binutils}
+
+Now that we have the Linux headers, we can use these in the process of
+bootstrapping binutils.  We set the system root to the OS staging directory,
+which is used by the binutils build process to select the correct headers for
+this target (as opposed to the local system headers).  We install binutils to
+the OS staging directory so that they can be used by the GCC and GNU libc
+builds.
+
+<<cross-build-binutils>>=
+#build binutils
+if [ ! -f ${BINUTILS_PKGFILE}.built ]; then
+    cd ${BINUTILS_DIR}
+    mkdir build
+    cd build
+    ../configure --prefix=${OSDIR}/cross-tools --target=${OS_TARGET} \
+        --with-sysroot=${OSDIR} --disable-nls --enable-shared --disable-multilib
+    make configure-host && make -j${CORES}
+    ln -sv lib ${OSDIR}/cross-tools/lib64
+    make install
+    cp -v ../include/libiberty.h ${OSDIR}/usr/include
+    cd ${WD}
+    touch ${BINUTILS_PKGFILE}.built
+else
+    echo "binutils already built."
+fi
+>>@<<
+
+\subsection{Building static GCC}
+
+Now, we build the statically linked version of GCC, which is statically linked
+to the current system libc.  This version is needed to bootstrap GNU libc, which
+is then used to build the full version of GCC.
+
+<<cross-build-gcc-static>>=
+#build gcc static
+if [ ! -f ${GCC_PKGFILE}.static_built ]; then
+    cd ${GCC_DIR}
+    mkdir build-static
+    cd build-static
+    AR=ar LDFLAGS="-Wl,-rpath,${OSDIR}/cross-tools/lib" \
+    ../configure --prefix=${OSDIR}/cross-tools \
+    --build=${OS_HOST} --host=${OS_HOST} \
+    --target=${OS_TARGET} \
+    --with-sysroot=${OSDIR}/target --disable-nls \
+    --disable-shared \
+    --with-mpfr-include=$(pwd)/../mpfr/src \
+    --with-mpfr-lib=$(pwd)/../mpfr/src/.libs \
+    --without-headers --with-newlib --disable-decimal-float \
+    --disable-libgomp --disable-libmudflap --disable-libssp \
+    --disable-threads --enable-languages=c,c++ \
+    --disable-multilib --with-arch=${OS_CPU}
+    make -j${CORES} all-gcc all-target-libgcc \
+        && make install-gcc install-target-libgcc
+    ln -vs libgcc.a \
+        `${OS_TARGET}-gcc -print-libgcc-file-name | sed 's/libgcc/&_eh/'`
+    cd ${WD}
+    touch ${GCC_PKGFILE}.static_built
+else
+    echo "gcc static already built."
+fi
+>>@<<
+
+\subsection{Building GNU libc}
+
+Now, we can build GNU libc.  This is needed for both the image and for building
+other system binaries.
+
+<<cross-build-glibc>>=
+#build glibc
+if [ ! -f ${GLIBC_PKGFILE}.built ]; then
+    cd ${GLIBC_DIR}
+    mkdir build
+    cd build
+    echo "libc_cv_forced_unwind=yes" > config.cache
+    echo "libc_cv_c_cleanup=yes" >> config.cache
+    echo "libc_cv_ssp=no" >> config.cache
+    echo "libc_cv_ssp_strong=no" >> config.cache
+    BUILD_CC="gcc" CC="${OS_TARGET}-gcc" \
+    AR="${OS_TARGET}-ar" \
+    RANLIB="${OS_TARGET}-ranlib" CFLAGS="-O2" \
+    ../configure --prefix=/usr \
+        --host=${OS_TARGET} --build=${OS_HOST} \
+        --disable-profile --enable-add-ons --with-tls \
+        --enable-kernel=${LINUX_VERSION} --with-__thread \
+        --with-binutils=${OSDIR}/cross-tools/bin \
+        --with-headers=${OSDIR}/usr/include \
+        --cache-file=config.cache
+    make -j${CORES} && make install_root=${OSDIR}/ install
+    cd ${WD}
+    touch ${GLIBC_PKGFILE}.built
+else
+    echo "glibc already built."
+fi
+>>@<<
+
+\subsection{Building GCC}
+
+Now, we can build the final version of GCC, linked against the final system
+version of GNU libc.
+
+<<cross-build-gcc-final>>=
+#build gcc final
+if [ ! -f ${GCC_PKGFILE}.built ]; then
+    cd ${GCC_DIR}
+    mkdir build-final
+    cd build-final
+    AR=ar LDFLAGS="-Wl,-rpath,${OSDIR}/cross-tools/lib" \
+    ../configure --prefix=${OSDIR}/cross-tools \
+    --build=${OS_HOST} --target=${OS_TARGET} \
+    --host=${OS_HOST} --with-sysroot=${OSDIR} \
+    --disable-nls --enable-shared \
+    --enable-languages=c,c++ --enable-c99 \
+    --enable-long-long \
+    --with-mpfr-include=$(pwd)/../mpfr/src \
+    --with-mpfr-lib=$(pwd)/../mpfr/src/.libs \
+    --disable-multilib --with-arch=${OS_CPU}
+    make -j${CORES} && make install
+    cp -v ${OSDIR}/cross-tools/${OS_TARGET}/lib64/libgcc_s.so.1 ${OSDIR}/lib64
+    touch ${GCC_PKGFILE}.built
+else
+    echo "gcc final already built."
+fi
+>>@<<
+
+\subsection{Tooling Adjustments}
+
+Now that GCC and binutils have been built, we will update them to be the default
+compilers used by other scripts.
+
+<<cross-use-gcc-final>>=
+#adjust tooling to use our new cross compiler
+export CC="${OS_TARGET}-gcc"
+export CXX="${OS_TARGET}-g++"
+export CPP="${OS_TARGET}-gcc -E"
+export AR="${OS_TARGET}-ar"
+export AS="${OS_TARGET}-as"
+export LD="${OS_TARGET}-ld"
+export RANLIB="${OS_TARGET}-ranlib"
+export READELF="${OS_TARGET}-readelf"
+export STRIP="${OS_TARGET}-strip"
 >>@<<

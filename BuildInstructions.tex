@@ -32,6 +32,7 @@ MPC_VERSION=1.2.1
 BINUTILS_VERSION=2.37
 GLIBC_VERSION=2.34
 BUSYBOX_VERSION=1.33.1
+GRUB_VERSION=2.06
 >>@<<
 
 The rest of this document will describe the build process in detail.
@@ -476,8 +477,8 @@ chmod -v 664 ${OSDIR}/var/run/utmp ${OSDIR}/var/log/lastlog
 \section{Downloading and Extracting Source Packages}
 
 Before the build, we will download and extract all packages.  We need to build
-GCC, the Linux kernel, GRUB, and busybox.  So, we will start with downloading,
-verifying, and extracting all of them.
+GCC, the Linux kernel, binutils, GNU libc, GRUB, and busybox.  So, we will start
+with downloading, verifying, and extracting all of them.
 
 <<FILE:build.sh>>=
     <<download-verify-and-extract-gcc>>
@@ -488,6 +489,7 @@ verifying, and extracting all of them.
     <<download-verify-and-extract-glibc>>
     <<download-verify-and-extract-binutils>>
     <<download-verify-and-extract-busybox>>
+    <<download-verify-and-extract-grub>>
 >>@<<
 
 \newpage
@@ -955,6 +957,66 @@ if [ ! -f ${BUSY_PKGFILE}.extracted ]; then
     touch ${BUSY_PKGFILE}.extracted
 else
     echo "${BUSY_PKGFILE} already extracted."
+fi
+>>@<<
+
+\newpage
+
+\subsection{The GRUB Source Package}
+
+GRUB provides us with the boot loader used to boot into Linux.  It handles the
+job of the initial boot from BIOS / UEFI and handoff to the kernel.  In a
+multiboot system, it would also manage booting into different operating systems
+or booting into a single operating system with different bootup options.  As
+before, we will repeat the basic download, verify, and extract process for
+busybox.  First, we will check to see if the package has already been
+downloaded.  If not, we will download it.  Then, we will verify and extract it.
+
+<<download-verify-and-extract-grub>>=
+GRUB_BASEFILE=grub-${GRUB_VERSION}.tar.xz
+GRUB_PKGFILE=${PKG_DIR}/${GRUB_BASEFILE}
+GRUB_URL=http://ftpmirror.gnu.org/gnu/grub/${GRUB_BASEFILE}
+GRUB_DIR=${PKG_DIR}/grub-${GRUB_VERSION}
+if [ ! -f ${GRUB_PKGFILE} ]; then
+    (cd ${PKG_DIR} && curl -L -O ${GRUB_URL})
+else
+    echo ${GRUB_PKGFILE} already downloaded
+fi
+>>@<<
+
+We can then verify that the GRUB package we have matches the pre-computed
+SHA-512 hash in the script.  This ensures that the package is a known good
+package that did not fail in download and was not tampered with.
+
+<<download-verify-and-extract-grub>>=
+GRUB_EXPECTED_HASH=\
+4f11c648f3078567e53fc0c74d5026fd\
+c6da4be27d188975e79d9a4df817ade0\
+fe5ad2ddd694238a07edc45adfa02943\
+d83c57767dd51548102b375e529e8efe
+if [ ! -f ${GRUB_PKGFILE}.verified ]; then
+    GRUB_CK=`openssl dgst -sha512 -hex ${GRUB_PKGFILE}`
+    GRUB_CK=`echo ${GRUB_CK} | awk -F= '{print $2}' | sed -e 's/^[ \t]//'`
+    if [ "${GRUB_EXPECTED_HASH}" = "${GRUB_CK}" ]; then
+        touch ${GRUB_PKGFILE}.verified
+        echo "${GRUB_PKGFILE} verified."
+    else
+        echo "${GRUB_PKGFILE} could not be verified (${GRUB_CK})."
+        exit 1
+    fi
+else
+    echo "${GRUB_PKGFILE} already verified."
+fi
+>>@<<
+
+Finally, we can extract GRUB.
+
+<<download-verify-and-extract-grub>>=
+if [ ! -f ${GRUB_PKGFILE}.extracted ]; then
+    (cd ${PKG_DIR} && xz -dc ${GRUB_BASEFILE} | tar -xvf -)
+    touch ${GRUB_PKGFILE}.extracted
+else
+    echo "${GRUB_PKGFILE} already extracted."
 fi
 >>@<<
 
